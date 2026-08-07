@@ -1,0 +1,9 @@
+{
+  "id": "floating-headings",
+  "name": "Floating Headings",
+  "version": "1.0.0",
+  "minAppVersion": "1.4.0",
+  "description": "A Google Docs style drag handle on the right edge: drag it to scroll, and the document's headings float over the page so you can tap one to jump there.",
+  "author": "metzo",
+  "isDesktopOnly": false
+}

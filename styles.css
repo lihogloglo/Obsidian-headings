@@ -1,0 +1,171 @@
+/* Floating Headings — Google Docs style scroll handle + heading overlay. */
+
+.fh-host {
+	/* The rail is absolutely positioned inside the view content. */
+	position: relative;
+}
+
+.fh-rail {
+	--fh-thumb-size: 40px;
+	--fh-thumb-inset: 8px;
+	--fh-label-offset: 56px;
+	--fh-label-height: 24px;
+
+	position: absolute;
+	top: 0;
+	right: 0;
+	bottom: 0;
+	width: min(80%, 520px);
+	pointer-events: none;
+	z-index: 12;
+	contain: layout style;
+}
+
+/* ------------------------------------------------------------------- handle */
+
+.fh-thumb {
+	position: absolute;
+	top: 0;
+	right: var(--fh-thumb-inset);
+	width: var(--fh-thumb-size);
+	height: var(--fh-thumb-size);
+	border-radius: 50%;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+
+	color: var(--text-muted);
+	background-color: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+
+	pointer-events: auto;
+	touch-action: none;
+	cursor: grab;
+	user-select: none;
+	-webkit-user-select: none;
+	-webkit-tap-highlight-color: transparent;
+
+	opacity: 0;
+	visibility: hidden;
+	transition: opacity 180ms ease, visibility 0s linear 180ms, color 120ms ease,
+		background-color 120ms ease;
+}
+
+/* Generous touch target without a bigger visual footprint. */
+.fh-thumb::before {
+	content: '';
+	position: absolute;
+	inset: -10px -12px;
+	border-radius: 50%;
+}
+
+.fh-rail.is-visible .fh-thumb {
+	opacity: 1;
+	visibility: visible;
+	transition-delay: 0s;
+}
+
+.fh-rail.is-dragging .fh-thumb {
+	cursor: grabbing;
+	color: var(--text-on-accent, var(--background-primary));
+	background-color: var(--interactive-accent, var(--text-normal));
+	border-color: transparent;
+	box-shadow: 0 3px 12px rgba(0, 0, 0, 0.28);
+}
+
+/* ------------------------------------------------------------------- labels */
+
+.fh-labels {
+	position: absolute;
+	inset: 0;
+	pointer-events: none;
+	opacity: 0;
+	transition: opacity 140ms ease;
+}
+
+.fh-rail.is-labels .fh-labels {
+	opacity: 1;
+}
+
+.fh-label {
+	position: absolute;
+	right: var(--fh-label-offset);
+	max-width: calc(100% - var(--fh-label-offset) - 8px);
+	box-sizing: border-box;
+	transform: translateY(-50%);
+
+	height: var(--fh-label-height);
+	line-height: calc(var(--fh-label-height) - 2px);
+	padding: 0 10px;
+	border-radius: calc(var(--fh-label-height) / 2);
+
+	font-size: 13px;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+
+	color: var(--text-muted);
+	background-color: var(--background-primary);
+	box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
+
+	pointer-events: none;
+	cursor: pointer;
+	user-select: none;
+	-webkit-user-select: none;
+	-webkit-tap-highlight-color: transparent;
+	transition: color 120ms ease, background-color 120ms ease;
+}
+
+.fh-rail.is-labels .fh-label {
+	pointer-events: auto;
+}
+
+.fh-label[data-level='1'] {
+	font-size: 14px;
+	font-weight: 600;
+	color: var(--text-normal);
+}
+
+.fh-label[data-level='2'] {
+	font-size: 13px;
+	font-weight: 500;
+}
+
+.fh-label[data-level='4'],
+.fh-label[data-level='5'],
+.fh-label[data-level='6'] {
+	font-size: 12px;
+	opacity: 0.85;
+}
+
+/* The current section, as a chip — mirrors the Google Docs highlight. */
+.fh-label.is-active {
+	color: var(--background-primary);
+	background-color: var(--text-normal);
+	font-weight: 600;
+	opacity: 1;
+	box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+	z-index: 1;
+}
+
+/* Slightly bigger touch targets on mobile. */
+.is-mobile .fh-rail {
+	--fh-thumb-size: 44px;
+	--fh-label-height: 26px;
+	--fh-label-offset: 62px;
+}
+
+.is-mobile .fh-label {
+	font-size: 14px;
+}
+
+.is-mobile .fh-label[data-level='1'] {
+	font-size: 15px;
+}
+
+@media print {
+	.fh-rail {
+		display: none;
+	}
+}
