@@ -4,10 +4,11 @@ A Google Docs style scroll handle for Obsidian, built for mobile and working the
 way on desktop.
 
 Scroll a note and a round handle fades in on the right edge. Drag it and the note
-scrolls with it while every heading floats over the right side of the page, each one
-sitting at the height it occupies in the document. The section you are currently in is
-highlighted as a chip. Let go and the headings linger for a couple of seconds so you
-can tap one and jump straight there. Ignore them and everything fades away.
+scrolls with it while the note's headings float over the right side of the page as an
+evenly spaced list, with the section you are currently in highlighted as a chip. Let go
+and the headings linger for a couple of seconds so you can tap one and jump straight
+there — it lands with the heading at the top of the screen. Ignore them and everything
+fades away.
 
 Works in editing mode (including Live Preview) and in reading mode.
 
@@ -30,20 +31,31 @@ mklink /J "<vault>\.obsidian\plugins\floating-headings" "d:\Gamedev\Obsidian hea
 | --- | --- | --- |
 | Enable on desktop | on | Turn off to restrict the handle to mobile. |
 | Always show the handle | off | Keep the handle on screen instead of fading it out. |
+| Handle top margin | 72 px | How far down the screen the handle sits at the top of a note. Raise it if the handle is awkward to reach. |
 | Hide the handle after | 1400 ms | Idle delay before the handle fades. |
 | Keep headings after releasing | 2500 ms | How long headings stay tappable after you let go. |
 | Deepest heading level | H6 | Headings deeper than this are never shown. |
-| Minimum spacing between headings | 26 px | Crowding threshold — see below. |
+| Spacing between headings | 32 px | Row height for the heading list — see below. |
 
 There is also a command, **Floating Headings: Show floating headings**, which reveals
 the headings without dragging. Handy on desktop, and bindable to a hotkey.
 
+## How the heading list behaves
+
+Headings are listed **evenly**, like Google Docs. The gaps say nothing about how far
+apart the headings are in the note — two headings a paragraph apart and two headings
+ten pages apart get the same spacing.
+
+If they all fit, they spread down the rail. If a note has more headings than fit on
+screen, the list becomes a window that slides through the full set as you drag, so
+every heading stays reachable and the section you are in is always on screen. Lower
+the spacing setting to fit more at once.
+
 ## How positions are worked out
 
-Each label sits at the handle position that would put its heading at the top of the
-screen, so a label's height on screen is literally where you have to drag to reach it.
-
-Getting a heading's pixel offset differs by mode:
+Even though the labels are evenly spaced, the plugin still needs each heading's real
+pixel offset — to know which section you are in, to slide the window in step with the
+scroll, and to land a jump accurately. That differs by mode:
 
 - **Editing / Live Preview** — CodeMirror keeps a height map covering the whole
   document, so `lineBlockAt` gives an offset for every heading even far off screen.
@@ -56,15 +68,15 @@ Getting a heading's pixel offset differs by mode:
 - **Fallback** — if neither is available, headings are spread by line number over the
   content height.
 
-When headings would overlap, labels are dropped by depth: H1s survive, deeper levels
-give way first. If the heading you are currently in was dropped, the nearest surviving
-label above it is highlighted instead, so the chip never disappears mid-drag.
+Tapping a label calls Obsidian's own `applyScroll` to get the region rendered, then
+measures the heading exactly and pins it to the top of the viewport, re-checking over
+the next couple of frames as the layout settles.
 
 ## Notes
 
 - Labels are anchored to the right edge and truncate with an ellipsis, so a long
   heading still lines up with the others.
-- Headings within the last screenful of the note all collapse toward the bottom of the
-  rail. That is inherent to scrollbar geometry — the note cannot scroll past its end.
+- The handle does not travel the full height of the screen — it keeps a margin at the
+  top (adjustable) and at the bottom so it stays easy to grab.
 - The handle sits where Obsidian's right edge-swipe gesture lives on mobile. It claims
   the touch while you drag, so the sidebar should not open from under you.

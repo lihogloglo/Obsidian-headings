@@ -3,10 +3,10 @@
 /*
  * Floating Headings — a Google Docs style scroll handle for Obsidian.
  *
- * Drag the round handle on the right edge to scroll. While you drag, every
- * heading in the note floats over the right side of the page at the vertical
- * position it occupies in the document. Let go and the headings linger for a
- * moment so you can tap one and jump straight to it.
+ * Drag the round handle on the right edge to scroll. While you drag, the note's
+ * headings float over the right side of the page as an evenly spaced list, with
+ * the section you are currently in highlighted. Let go and the headings linger
+ * for a moment so you can tap one and jump straight to it.
  */
 
 const obsidian = require('obsidian');
@@ -17,7 +17,8 @@ const DEFAULT_SETTINGS = {
 	autoHideMs: 1400,
 	lingerMs: 2500,
 	maxLevel: 6,
-	minLabelGap: 26,
+	labelSpacing: 32,
+	handleTopMargin: 72,
 	alwaysShowHandle: false,
 };
 
@@ -25,7 +26,15 @@ const DEFAULT_SETTINGS = {
  * would just be in the way. */
 const MIN_SCROLLABLE_PX = 120;
 const MAX_HEADINGS = 600;
-const MAX_LABELS = 60;
+/* Keeps a two-heading note from stretching its labels to the screen edges. */
+const MAX_EVEN_GAP = 2.5;
+const HANDLE_BOTTOM_MARGIN = 40;
+/* Breathing room above a heading after jumping to it. */
+const JUMP_TOP_MARGIN = 8;
+/* A heading becomes the current one once its top reaches the top of the
+ * viewport. The slack has to cover the margin jumpTo leaves above it, or the
+ * heading you just tapped wouldn't be the one highlighted. */
+const ACTIVE_SLACK = JUMP_TOP_MARGIN + 2;
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
 function clamp(v, lo, hi) {
@@ -91,8 +100,18 @@ class HeadingRail {
 		this.items = [];
 		this.labels = [];
 		this.activeLabel = null;
+
 		this.thumbSize = 40;
 		this.thumbPos = 0;
+		this.trackTop = 0;
+		this.trackRange = 1;
+
+		/* Label list layout, recomputed by layoutLabels(). */
+		this.windowed = false;
+		this.capacity = 1;
+		this.rowGap = 0;
+		this.listStart = 0;
+		this.windowStart = -1;
 
 		this.dragging = false;
 		this.pointerId = null;
@@ -125,8 +144,13 @@ class HeadingRail {
 		const rail = document.createElement('div');
 		rail.className = 'fh-rail';
 
+		/* The clip box stays put while the track slides inside it, so a long
+		 * heading list can scroll smoothly past the edges. */
 		const labels = document.createElement('div');
 		labels.className = 'fh-labels';
+		const track = document.createElement('div');
+		track.className = 'fh-labels-track';
+		labels.appendChild(track);
 
 		const thumb = document.createElement('div');
 		thumb.className = 'fh-thumb';
@@ -139,6 +163,7 @@ class HeadingRail {
 
 		this.railEl = rail;
 		this.labelsEl = labels;
+		this.trackEl = track;
 		this.thumbEl = thumb;
 
 		thumb.addEventListener('pointerdown', this.onPointerDown);
@@ -305,6 +330,11 @@ class HeadingRail {
 		return items.map((it) => (it.line / total) * height);
 	}
 
+	measureLines(items, sc) {
+		const inPreview = this.view.getMode() === 'preview';
+		return inPreview ? this.measurePreview(items, sc) : this.measureSource(items, sc);
+	}
+
 	measure() {
 		const sc = this.ensureScroller();
 		this.items = [];
@@ -313,77 +343,133 @@ class HeadingRail {
 		const items = this.collectHeadings();
 		if (!items.length) return;
 
-		const mode = this.view.getMode();
-		let ys = mode === 'preview' ? this.measurePreview(items, sc) : this.measureSource(items, sc);
+		let ys = this.measureLines(items, sc);
 		if (!ys) ys = this.measureByLine(items, sc);
 
+		/* Document order is the truth; nudge the offsets to stay monotonic so
+		 * the "which heading am I in" lookup can't go backwards. */
 		const max = Math.max(1, this.maxScroll());
+		let running = 0;
 		for (let i = 0; i < items.length; i++) {
-			const y = clamp(Number(ys[i]) || 0, 0, max);
+			const y = Math.max(running, clamp(Number(ys[i]) || 0, 0, max));
 			items[i].y = y;
-			items[i].frac = y / max;
+			running = y;
 		}
-		items.sort((a, b) => a.y - b.y || a.line - b.line);
 		this.items = items;
 	}
 
-	/* ----------------------------------------------------------------- labels */
+	/* Exact scroll offset that puts `line` at the top of the viewport. Only
+	 * trustworthy for a line that is currently rendered. */
+	lineTop(line) {
+		const sc = this.scroller;
+		if (!sc) return null;
+		const ys = this.measureLines([{ line }], sc);
+		return ys && Number.isFinite(ys[0]) ? ys[0] : null;
+	}
 
-	renderLabels() {
-		this.labelsEl.textContent = '';
+	/* ----------------------------------------------------------------- layout */
+
+	trackGeometry() {
+		const height = this.railEl.clientHeight;
+		this.thumbSize = this.thumbEl.offsetHeight || this.thumbSize;
+		const top = clamp(this.settings.handleTopMargin, 0, Math.max(0, height * 0.4));
+		const bottom = clamp(HANDLE_BOTTOM_MARGIN, 0, Math.max(0, height * 0.2));
+		this.trackTop = top;
+		this.trackRange = Math.max(1, height - this.thumbSize - top - bottom);
+		return this.trackRange;
+	}
+
+	/* Headings are listed evenly, the way Google Docs does it — the gaps say
+	 * nothing about how far apart they are in the note. */
+	layoutLabels() {
 		this.labels = [];
 		this.activeLabel = null;
+		this.windowStart = -1;
+		this.trackEl.textContent = '';
 
 		const height = this.railEl.clientHeight;
-		if (!height || !this.items.length) return;
+		const n = this.items.length;
+		if (!height || !n) return;
 
-		this.thumbSize = this.thumbEl.offsetHeight || this.thumbSize;
-		/* Label centres share the thumb's travel range, so a label sits exactly
-		 * where the thumb will be when that heading reaches the top. */
-		const padding = this.thumbSize / 2;
-		const usable = Math.max(1, height - this.thumbSize);
-		for (const it of this.items) it.top = padding + it.frac * usable;
+		const spacing = Math.max(14, this.settings.labelSpacing);
+		const pad = Math.round((this.thumbEl.offsetHeight || this.thumbSize) / 2) + 4;
+		const listHeight = Math.max(1, height - pad * 2);
+		const capacity = Math.max(1, Math.floor(listHeight / spacing));
 
-		/* When headings crowd together, keep the most important ones: shallower
-		 * levels win, then document order. */
-		const gap = this.settings.minLabelGap;
-		const order = this.items.map((it, i) => ({ it, i }));
-		order.sort((a, b) => a.it.level - b.it.level || a.i - b.i);
-
-		const kept = [];
-		for (const candidate of order) {
-			let collides = false;
-			for (const k of kept) {
-				if (Math.abs(k.it.top - candidate.it.top) < gap) {
-					collides = true;
-					break;
-				}
-			}
-			if (!collides) kept.push(candidate);
-			if (kept.length >= MAX_LABELS) break;
+		if (n <= capacity) {
+			const even = n > 1 ? listHeight / (n - 1) : 0;
+			const gap = Math.min(even, spacing * MAX_EVEN_GAP);
+			this.windowed = false;
+			this.rowGap = gap;
+			this.listStart = pad + (listHeight - gap * (n - 1)) / 2;
+		} else {
+			/* Too many to fit: show a window that slides through the list as
+			 * you drag, so every heading is still reachable. */
+			this.windowed = true;
+			this.rowGap = spacing;
+			this.listStart = pad;
 		}
-		kept.sort((a, b) => a.i - b.i);
+		this.capacity = capacity;
+		this.renderWindow(true);
+	}
 
+	/* Where the viewport sits in heading-space, as a fractional index. */
+	headingIndexAt(scrollTop) {
+		const items = this.items;
+		const n = items.length;
+		if (!n || scrollTop <= items[0].y) return 0;
+		let i = n - 1;
+		while (i > 0 && items[i].y > scrollTop) i--;
+		const from = items[i].y;
+		const to = i + 1 < n ? items[i + 1].y : Math.max(from + 1, this.maxScroll());
+		return i + clamp((scrollTop - from) / Math.max(1, to - from), 0, 1);
+	}
+
+	renderWindow(force) {
+		const n = this.items.length;
+		if (!n) return;
+
+		let startIndex = 0;
+		let sub = 0;
+		if (this.windowed) {
+			const at = this.headingIndexAt(this.scroller ? this.scroller.scrollTop : 0);
+			const start = clamp(at - (this.capacity - 1) / 2, 0, n - this.capacity);
+			startIndex = Math.floor(start);
+			sub = start - startIndex;
+		}
+		this.trackEl.style.transform = 'translateY(' + -sub * this.rowGap + 'px)';
+
+		if (!force && startIndex === this.windowStart) {
+			this.updateActive();
+			return;
+		}
+		this.windowStart = startIndex;
+
+		const last = this.windowed ? Math.min(n - 1, startIndex + this.capacity) : n - 1;
 		const frag = document.createDocumentFragment();
-		for (const { it, i } of kept) {
+		this.labels = [];
+		this.activeLabel = null;
+		for (let i = startIndex; i <= last; i++) {
+			const it = this.items[i];
 			const el = document.createElement('div');
 			el.className = 'fh-label';
 			el.dataset.level = String(it.level);
 			el.dataset.line = String(it.line);
-			el.style.top = it.top + 'px';
+			el.style.top = this.listStart + (i - startIndex) * this.rowGap + 'px';
 			el.textContent = it.text;
 			el.title = it.text;
 			frag.appendChild(el);
 			this.labels.push({ el, index: i });
 		}
-		this.labelsEl.appendChild(frag);
+		this.trackEl.textContent = '';
+		this.trackEl.appendChild(frag);
 		this.updateActive();
 	}
 
 	updateActive() {
 		const sc = this.scroller;
 		if (!sc || !this.labels.length) return;
-		const at = sc.scrollTop + 2;
+		const at = sc.scrollTop + ACTIVE_SLACK;
 
 		let index = -1;
 		for (let i = 0; i < this.items.length; i++) {
@@ -393,8 +479,10 @@ class HeadingRail {
 
 		let target = null;
 		for (const label of this.labels) {
-			if (label.index <= index) target = label;
-			else break;
+			if (label.index === index) {
+				target = label;
+				break;
+			}
 		}
 		if (target === this.activeLabel) return;
 		if (this.activeLabel) this.activeLabel.el.classList.remove('is-active');
@@ -407,10 +495,9 @@ class HeadingRail {
 	syncThumb() {
 		const sc = this.scroller;
 		if (!sc) return;
-		this.thumbSize = this.thumbEl.offsetHeight || this.thumbSize;
+		const range = this.trackGeometry();
 		const max = Math.max(1, this.maxScroll());
-		const track = Math.max(1, this.railEl.clientHeight - this.thumbSize);
-		this.thumbPos = clamp(sc.scrollTop / max, 0, 1) * track;
+		this.thumbPos = this.trackTop + clamp(sc.scrollTop / max, 0, 1) * range;
 		this.thumbEl.style.transform = 'translateY(' + this.thumbPos + 'px)';
 	}
 
@@ -461,7 +548,7 @@ class HeadingRail {
 		this.measure();
 		this.show();
 		if (this.items.length) {
-			this.renderLabels();
+			this.layoutLabels();
 			this.showLabels();
 			this.lingerLabels();
 		}
@@ -480,13 +567,13 @@ class HeadingRail {
 		else this.syncThumb();
 		if (this.labelsOn) {
 			this.measure();
-			this.renderLabels();
+			this.layoutLabels();
 		}
 	}
 
 	onResize() {
 		this.syncThumb();
-		if (this.labelsOn) this.renderLabels();
+		if (this.labelsOn) this.layoutLabels();
 	}
 
 	/* ------------------------------------------------------------------ events */
@@ -497,7 +584,7 @@ class HeadingRail {
 		this.scrollRaf = requestAnimationFrame(() => {
 			this.scrollRaf = 0;
 			this.show();
-			if (this.labelsOn) this.updateActive();
+			if (this.labelsOn) this.renderWindow(false);
 		});
 	}
 
@@ -522,7 +609,7 @@ class HeadingRail {
 		try {
 			this.thumbEl.setPointerCapture(e.pointerId);
 		} catch (err) {
-			/* ignore — we fall back to document-level listeners below */
+			/* ignore — the document listeners below keep the drag alive */
 		}
 
 		window.clearTimeout(this.hideTimer);
@@ -532,7 +619,7 @@ class HeadingRail {
 		this.show();
 
 		this.measure();
-		this.renderLabels();
+		this.layoutLabels();
 		if (this.items.length) this.showLabels();
 
 		this.attachDragListeners();
@@ -572,12 +659,13 @@ class HeadingRail {
 	applyDrag() {
 		const sc = this.scroller;
 		if (!sc || !this.dragging) return;
-		const track = Math.max(1, this.railEl.clientHeight - this.thumbSize);
-		const pos = clamp(this.dragStartThumb + (this.pendingY - this.dragStartY), 0, track);
+		const top = this.trackTop;
+		const range = this.trackRange;
+		const pos = clamp(this.dragStartThumb + (this.pendingY - this.dragStartY), top, top + range);
 		this.thumbPos = pos;
 		this.thumbEl.style.transform = 'translateY(' + pos + 'px)';
-		sc.scrollTop = (pos / track) * this.maxScroll();
-		this.updateActive();
+		sc.scrollTop = ((pos - top) / range) * this.maxScroll();
+		this.renderWindow(false);
 	}
 
 	onPointerUp(e) {
@@ -607,20 +695,29 @@ class HeadingRail {
 	}
 
 	jumpTo(line) {
-		let jumped = false;
+		const sc = this.ensureScroller();
 		try {
 			const mode = this.view.currentMode;
-			if (mode && typeof mode.applyScroll === 'function') {
-				mode.applyScroll(line);
-				jumped = true;
-			}
+			if (mode && typeof mode.applyScroll === 'function') mode.applyScroll(line);
 		} catch (err) {
-			jumped = false;
+			/* fall through to the pixel correction below */
 		}
-		if (!jumped && this.scroller) {
-			const item = this.items.find((it) => it.line === line);
-			if (item) this.scroller.scrollTop = item.y;
-		}
+
+		/* applyScroll gets the region rendered but leaves the heading part way
+		 * down the screen. Now that it is rendered we can measure it exactly
+		 * and pin it to the top, re-checking as the layout settles. */
+		const settle = (attempt) => {
+			if (!sc || !sc.isConnected) return;
+			let y = this.lineTop(line);
+			if (y == null) {
+				const item = this.items.find((it) => it.line === line);
+				y = item ? item.y : null;
+			}
+			if (y != null) sc.scrollTop = clamp(y - JUMP_TOP_MARGIN, 0, this.maxScroll());
+			if (attempt < 2) requestAnimationFrame(() => settle(attempt + 1));
+		};
+		requestAnimationFrame(() => settle(0));
+
 		this.hideLabels();
 		this.show();
 	}
@@ -647,7 +744,7 @@ class FloatingHeadingsPlugin extends Plugin {
 				for (const rail of this.rails.values()) {
 					if (rail.view.file === file && rail.labelsOn) {
 						rail.measure();
-						rail.renderLabels();
+						rail.layoutLabels();
 					}
 				}
 			})
@@ -715,6 +812,8 @@ class FloatingHeadingsPlugin extends Plugin {
 		}
 		this.sync();
 		for (const rail of this.rails.values()) {
+			rail.syncThumb();
+			if (rail.labelsOn) rail.layoutLabels();
 			if (!this.settings.alwaysShowHandle) rail.scheduleHide();
 		}
 	}
@@ -730,6 +829,18 @@ class FloatingHeadingsSettingTab extends PluginSettingTab {
 		const { containerEl } = this;
 		containerEl.empty();
 		const s = this.plugin.settings;
+
+		const reset = (setting, key) =>
+			setting.addExtraButton((b) =>
+				b
+					.setIcon('rotate-ccw')
+					.setTooltip('Reset')
+					.onClick(async () => {
+						s[key] = DEFAULT_SETTINGS[key];
+						await this.plugin.saveSettings();
+						this.display();
+					})
+			);
 
 		new Setting(containerEl)
 			.setName('Enable on desktop')
@@ -751,53 +862,58 @@ class FloatingHeadingsSettingTab extends PluginSettingTab {
 				})
 			);
 
-		new Setting(containerEl)
-			.setName('Hide the handle after')
-			.setDesc('How long the handle stays visible once scrolling stops.')
-			.addSlider((sl) =>
-				sl
-					.setLimits(400, 5000, 100)
-					.setValue(s.autoHideMs)
-					.setDynamicTooltip()
-					.onChange(async (v) => {
-						s.autoHideMs = v;
-						await this.plugin.saveSettings();
-					})
-			)
-			.addExtraButton((b) =>
-				b
-					.setIcon('rotate-ccw')
-					.setTooltip('Reset')
-					.onClick(async () => {
-						s.autoHideMs = DEFAULT_SETTINGS.autoHideMs;
-						await this.plugin.saveSettings();
-						this.display();
-					})
-			);
+		reset(
+			new Setting(containerEl)
+				.setName('Handle top margin')
+				.setDesc(
+					'How far down the screen the handle sits at the top of a note. Raise it if the handle is awkward to reach.'
+				)
+				.addSlider((sl) =>
+					sl
+						.setLimits(0, 200, 4)
+						.setValue(s.handleTopMargin)
+						.setDynamicTooltip()
+						.onChange(async (v) => {
+							s.handleTopMargin = v;
+							await this.plugin.saveSettings();
+						})
+				),
+			'handleTopMargin'
+		);
 
-		new Setting(containerEl)
-			.setName('Keep headings after releasing')
-			.setDesc('How long the headings stay tappable once you let go of the handle.')
-			.addSlider((sl) =>
-				sl
-					.setLimits(500, 8000, 100)
-					.setValue(s.lingerMs)
-					.setDynamicTooltip()
-					.onChange(async (v) => {
-						s.lingerMs = v;
-						await this.plugin.saveSettings();
-					})
-			)
-			.addExtraButton((b) =>
-				b
-					.setIcon('rotate-ccw')
-					.setTooltip('Reset')
-					.onClick(async () => {
-						s.lingerMs = DEFAULT_SETTINGS.lingerMs;
-						await this.plugin.saveSettings();
-						this.display();
-					})
-			);
+		reset(
+			new Setting(containerEl)
+				.setName('Hide the handle after')
+				.setDesc('How long the handle stays visible once scrolling stops.')
+				.addSlider((sl) =>
+					sl
+						.setLimits(400, 5000, 100)
+						.setValue(s.autoHideMs)
+						.setDynamicTooltip()
+						.onChange(async (v) => {
+							s.autoHideMs = v;
+							await this.plugin.saveSettings();
+						})
+				),
+			'autoHideMs'
+		);
+
+		reset(
+			new Setting(containerEl)
+				.setName('Keep headings after releasing')
+				.setDesc('How long the headings stay tappable once you let go of the handle.')
+				.addSlider((sl) =>
+					sl
+						.setLimits(500, 8000, 100)
+						.setValue(s.lingerMs)
+						.setDynamicTooltip()
+						.onChange(async (v) => {
+							s.lingerMs = v;
+							await this.plugin.saveSettings();
+						})
+				),
+			'lingerMs'
+		);
 
 		new Setting(containerEl)
 			.setName('Deepest heading level')
@@ -810,21 +926,24 @@ class FloatingHeadingsSettingTab extends PluginSettingTab {
 				});
 			});
 
-		new Setting(containerEl)
-			.setName('Minimum spacing between headings')
-			.setDesc(
-				'Pixels of breathing room between labels. When headings would overlap, the shallower levels win.'
-			)
-			.addSlider((sl) =>
-				sl
-					.setLimits(16, 64, 2)
-					.setValue(s.minLabelGap)
-					.setDynamicTooltip()
-					.onChange(async (v) => {
-						s.minLabelGap = v;
-						await this.plugin.saveSettings();
-					})
-			);
+		reset(
+			new Setting(containerEl)
+				.setName('Spacing between headings')
+				.setDesc(
+					'Row height for the heading list. When a note has more headings than fit, the list scrolls as you drag.'
+				)
+				.addSlider((sl) =>
+					sl
+						.setLimits(18, 72, 2)
+						.setValue(s.labelSpacing)
+						.setDynamicTooltip()
+						.onChange(async (v) => {
+							s.labelSpacing = v;
+							await this.plugin.saveSettings();
+						})
+				),
+			'labelSpacing'
+		);
 	}
 }
 

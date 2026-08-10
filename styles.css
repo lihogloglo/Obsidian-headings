@@ -76,12 +76,22 @@
 
 /* ------------------------------------------------------------------- labels */
 
+/* The clip box stays still... */
 .fh-labels {
 	position: absolute;
 	inset: 0;
+	overflow: hidden;
 	pointer-events: none;
 	opacity: 0;
 	transition: opacity 140ms ease;
+}
+
+/* ...while the track slides inside it, so a heading list that is too long to
+ * fit can scroll smoothly rather than jumping a row at a time. */
+.fh-labels-track {
+	position: absolute;
+	inset: 0;
+	will-change: transform;
 }
 
 .fh-rail.is-labels .fh-labels {
